@@ -1,0 +1,4 @@
+{
+  "nvd_api_key": "your-nvd-api-key-here",
+  "proxy": "http://user:pass@proxy.company.com:8080"
+}
