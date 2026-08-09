@@ -5,11 +5,13 @@ same JSON/ZIP shapes DT already knows how to read.
 
 - `osv_database_downloader.py` -- OSV (Open Source Vulnerabilities), per-ecosystem
 - `nvd_database_downloader.py` -- NIST NVD, full catalog or recent changes
+- `cert_fr_fetch.py` -- CERT-FR (French CERT) advisories and alerts
 
 ## Enterprise Proxy
 
-Both tools work identically behind a corporate proxy, and require no configuration at all when
-there isn't one. Outbound requests go through an explicit proxy override resolved in this order:
+All three tools work identically behind a corporate proxy, and require no configuration at all
+when there isn't one. Outbound requests go through an explicit proxy override resolved in this
+order:
 
 1. `--proxy` CLI flag
 2. `proxy` in `./config.json` (copy `config.json.example` and fill in your proxy URL;
@@ -20,6 +22,7 @@ there isn't one. Outbound requests go through an explicit proxy override resolve
 ```bash
 python osv_database_downloader.py --proxy http://user:pass@proxy.company.com:8080
 python nvd_database_downloader.py --mode full --source zip --proxy http://proxy.company.com:8080
+python cert_fr_fetch.py --proxy http://user:pass@proxy.company.com:8080
 ```
 
 ---
@@ -172,3 +175,58 @@ download/nvd/
 ├── ...
 └── nvd_modified_2d-2026-07-25.json   # --mode days: one dated file per run
 ```
+
+---
+
+# CERT-FR Bulletin Downloader
+
+Downloads every advisory (`avis`) and alert (`alerte`) published by CERT-FR
+(cert.ssi.gouv.fr), one JSON file per bulletin (the site's own per-bulletin JSON payload,
+unmodified).
+
+## Usage
+
+```bash
+# Fetch both avis and alerte (default)
+python cert_fr_fetch.py
+
+# Only advisories, into a custom directory
+python cert_fr_fetch.py --types avis --output /path/to/bulletins
+
+# Slower crawl, gentler on the server
+python cert_fr_fetch.py --delay 1.0
+```
+
+### Command Line Options
+
+- `--output`: Output directory (default: `bulletins`)
+- `--types`: Comma-separated bulletin types to fetch (default: `avis,alerte`)
+- `--delay`: Delay between requests in seconds (default: `0.3`)
+- `--proxy`: Proxy URL for all outbound requests (see [Enterprise Proxy](#enterprise-proxy))
+
+## Incremental Updates
+
+Each run lists every bulletin currently published for a type, then skips any reference already
+present in that type's `current/` directory -- so a daily run only downloads bulletins that are
+actually new. There is no separate timestamp/state file: the presence of the file itself is the
+watermark.
+
+## Output Structure
+
+```
+bulletins/
+├── avis/
+│   ├── current/                 # Every avis ever downloaded (grows over time)
+│   │   ├── CERTFR-2026-AVI-0001.json
+│   │   └── CERTFR-2026-AVI-0002.json
+│   └── new/                     # Reset every run: only bulletins fetched in this run
+│       └── CERTFR-2026-AVI-0002.json
+└── alerte/
+    ├── current/
+    └── new/
+```
+
+`current/` is the cumulative mirror and also the delta reference (a bulletin already there is
+never re-fetched). `new/` is emptied at the start of every run and ends up holding exactly the
+bulletins added during that run -- convenient for feeding only "what's new today" into a
+downstream pipeline without diffing `current/` yourself.
