@@ -6,6 +6,7 @@ same JSON/ZIP shapes DT already knows how to read.
 - `osv_database_downloader.py` -- OSV (Open Source Vulnerabilities), per-ecosystem
 - `nvd_database_downloader.py` -- NIST NVD, full catalog or recent changes
 - `cert_fr_fetch.py` -- CERT-FR (French CERT) advisories and alerts
+- `debian_security_fetch.py` -- Debian Security Advisories (DSA) and Debian LTS Advisories (DLA)
 
 ## Enterprise Proxy
 
@@ -23,6 +24,7 @@ order:
 python osv_database_downloader.py --proxy http://user:pass@proxy.company.com:8080
 python nvd_database_downloader.py --mode full --source zip --proxy http://proxy.company.com:8080
 python cert_fr_fetch.py --proxy http://user:pass@proxy.company.com:8080
+python debian_security_fetch.py --proxy http://user:pass@proxy.company.com:8080
 ```
 
 ---
@@ -230,3 +232,94 @@ bulletins/
 never re-fetched). `new/` is emptied at the start of every run and ends up holding exactly the
 bulletins added during that run -- convenient for feeding only "what's new today" into a
 downstream pipeline without diffing `current/` yourself.
+
+---
+
+# Debian Security Advisory (DSA/DLA) Downloader
+
+Downloads Debian Security Advisories (DSA) and Debian LTS Advisories (DLA) from the Debian
+Security Tracker's own machine-readable list files (`data/DSA/list`, `data/DLA/list` on
+salsa.debian.org) -- the same source Debian itself uses to generate debian.org/security.
+One JSON file per advisory, with the package name, CVE list, and every fixed version per Debian
+release (suite codename) the advisory applies to.
+
+## Usage
+
+```bash
+# Fetch both DSA and DLA (default)
+python debian_security_fetch.py
+
+# Only DSA, into a custom directory
+python debian_security_fetch.py --types dsa --output /path/to/debian
+
+# Only advisories published in the last 2 days -- for a daily/scheduled run, or a first
+# bootstrap where you don't want years of history
+python debian_security_fetch.py --days 2
+
+python debian_security_fetch.py --proxy http://user:pass@proxy.company.com:8080
+```
+
+### Command Line Options
+
+- `--output`: Output directory (default: `debian`)
+- `--types`: Comma-separated advisory types to fetch (default: `dsa,dla`)
+- `--days`: Only keep advisories published in the last N days (default: no limit, full history).
+  The upstream list file is always fetched in full either way -- it's one small file, not worth
+  optimizing away -- this only limits what gets written to `current/`/`new/`.
+- `--proxy`: Proxy URL for all outbound requests (see [Enterprise Proxy](#enterprise-proxy))
+
+## Incremental Updates
+
+Same convention as CERT-FR: each advisory ID already present in `current/` is never re-fetched or
+re-parsed, so a daily run only writes what's actually new. There is no separate timestamp/state
+file -- the presence of the file itself is the watermark. A revised advisory gets a new ID
+(`DSA-6455-2` replacing `DSA-6455-1`) and is naturally treated as new, not skipped as a duplicate.
+
+## Output Structure
+
+```
+debian/
+├── dsa/
+│   ├── current/                 # Every DSA ever downloaded (grows over time)
+│   │   ├── DSA-6455-1.json
+│   │   └── DSA-6454-1.json
+│   └── new/                     # Reset every run: only advisories fetched in this run
+│       └── DSA-6455-1.json
+└── dla/
+    ├── current/
+    └── new/
+```
+
+## Advisory JSON Shape
+
+```json
+{
+  "id": "DSA-6455-1",
+  "type": "DSA",
+  "date": "20 Aug 2026",
+  "package": "chromium",
+  "title": "security update",
+  "cves": ["CVE-2026-76033", "CVE-2026-76034"],
+  "fixes": [
+    {"release": "trixie", "package": "chromium", "version": "151.0.7922.169-1~deb13u1"}
+  ]
+}
+```
+
+`fixes` can hold more than one entry when the same advisory was backported to multiple Debian
+releases (e.g. `bullseye` and `bookworm` for the same DLA) -- each with its own fixed version,
+since Debian releases carry independent version numbering per suite. `cves` is empty (not absent)
+for the advisories that don't reference a CVE yet.
+
+## Downstream matching (not done by this script)
+
+This script only fetches and normalizes the raw advisory data -- it does not talk to
+Dependency-Track. Turning these JSON files into vulnerability matches against components requires
+a parser that builds a PURL per `fixes` entry
+(`pkg:deb/debian/<package>@<version>?distro=debian-<release>`, or `pkg:deb/ubuntu/...` for an
+Ubuntu equivalent) and feeds it through DT's existing Debian-aware version comparator -- not
+written yet. The `dependency-track` repo's `vuln-data-source/certfr/` module (a Maven plugin:
+`CertFRVulnDataSource`, `CertFRVulnDataSourceFactory`, `CertFRVulnDataSourcePlugin`,
+`CertFRModelConverter`) is the pattern this fork already uses for turning an offline-mirrored
+directory of JSON files into `VulnerableSoftware` rows -- a `vuln-data-source/debian/` module
+following the same shape is the next step.
