@@ -50,7 +50,12 @@ HEADER_RE = re.compile(
     r"^\[(?P<date>\d{1,2} \w+ \d{4})\]\s+(?P<id>\S+)\s+(?P<package>\S+)\s+-\s+(?P<title>.+)$"
 )
 CVE_LINE_RE = re.compile(r"^\{(?P<cves>.+)\}$")
-RELEASE_LINE_RE = re.compile(r"^\[(?P<release>[\w-]+)\]\s+-\s+(?P<package>\S+)\s+(?P<version>\S+)$")
+# Trailing "(...)" is an optional free-text annotation seen on older (pre-~2010) entries --
+# a severity ("(high)"), a bug reference ("(bug #302701)"), or a note on why a <marker> version
+# applies ("(Vulnerable code not present)"). Not part of the version; discarded if present.
+RELEASE_LINE_RE = re.compile(
+    r"^\[(?P<release>[\w-]+)\]\s+-\s+(?P<package>\S+)\s+(?P<version>\S+)(?:\s+\(.*\))?$"
+)
 
 # Matches the "date" field this script itself writes into each advisory (HEADER_RE's capture,
 # e.g. "20 Aug 2026") -- used only for --days filtering, not for parsing the upstream file.
@@ -131,10 +136,16 @@ def parse_list(text: str, advisory_type: str) -> list[dict]:
 
         release_line = RELEASE_LINE_RE.match(stripped)
         if release_line:
+            version = release_line.group("version")
+            # Debian's list format uses bracketed markers instead of a real version when there
+            # is nothing to point a fix at, e.g. "[jessie] - elasticsearch <end-of-life>" (also
+            # seen: <not-affected>, <unfixed>). Not a version string -- skip the entry.
+            if version.startswith("<") and version.endswith(">"):
+                continue
             current["fixes"].append({
                 "release": release_line.group("release"),
                 "package": release_line.group("package"),
-                "version": release_line.group("version"),
+                "version": version,
             })
             continue
 
