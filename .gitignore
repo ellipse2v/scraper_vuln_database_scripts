@@ -3,3 +3,5 @@ download/
 bulletins
 debian/
 __pycache__/
+output/euvd/euvd_kev.json
+output/vulncheck/vulncheck_kev.json
