@@ -1,9 +1,0 @@
-; Copy to config.ini and fill in your values (config.ini is gitignored).
-; Environment variables (NVD_API_KEY, VULNCHECK_API_KEY) take precedence over this file.
-
-[api_keys]
-nvd_api_key = your-nvd-api-key-here
-vulncheck_api_key = your-vulncheck-api-key-here
-
-[network]
-proxy = http://user:pass@proxy.company.com:8080
