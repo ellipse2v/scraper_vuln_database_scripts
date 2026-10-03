@@ -15,9 +15,11 @@ when there isn't one. Outbound requests go through an explicit proxy override re
 order:
 
 1. `--proxy` CLI flag
-2. `proxy` in `./config.json` (copy `config.json.example` and fill in your proxy URL;
+2. `proxy` in the `[network]` section of `./config.ini` (copy `config.ini.example`;
+   `config.ini` is gitignored) -- currently read by `nvd_database_downloader.py`
+3. `proxy` in `./config.json` (copy `config.json.example` and fill in your proxy URL;
    `config.json` is gitignored)
-3. Neither set: the standard `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` environment variables are
+4. None set: the standard `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` environment variables are
    still honored automatically (the underlying `requests` library reads them on its own)
 
 ```bash
@@ -26,6 +28,17 @@ python nvd_database_downloader.py --mode full --source zip --proxy http://proxy.
 python cert_fr_fetch.py --proxy http://user:pass@proxy.company.com:8080
 python debian_security_fetch.py --proxy http://user:pass@proxy.company.com:8080
 ```
+
+## API Keys (`kevDownloader.py`)
+
+`kevDownloader.py` downloads the VulnCheck KEV (requires an API key) and the ENISA EUVD KEV dump.
+The VulnCheck key is resolved in this order:
+
+1. `VULNCHECK_API_KEY` environment variable
+2. `vulncheck_api_key` in the `[api_keys]` section of `./config.ini` (see `config.ini.example`)
+3. `vulncheck_api_key` in `./config.json` (see `config.json.example`)
+
+If none is set, VulnCheck is skipped and only EUVD is downloaded.
 
 ---
 
@@ -160,7 +173,9 @@ not need a key at all). Resolved in this order:
 
 1. `--api-key` CLI flag
 2. `NVD_API_KEY` environment variable
-3. `nvd_api_key` in `./config.json` (copy `config.json.example` and fill in your key; `config.json`
+3. `nvd_api_key` in the `[api_keys]` section of `./config.ini` (copy `config.ini.example`;
+   `config.ini` is gitignored)
+4. `nvd_api_key` in `./config.json` (copy `config.json.example` and fill in your key; `config.json`
    is gitignored)
 
 ## Proxy

@@ -15,20 +15,58 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import configparser
 import json
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
 
-VULNCHECK_API_KEY = os.environ.get("VULNCHECK_API_KEY")
+CONFIG_INI_FILE = "./config.ini"
+CONFIG_JSON_FILE = "./config.json"
+
+
+def load_ini_config():
+    """Charge config.ini s'il existe. Retourne un ConfigParser vide sinon."""
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_INI_FILE):
+        try:
+            config.read(CONFIG_INI_FILE, encoding="utf-8")
+        except configparser.Error as e:
+            print(f"⚠️ Impossible de lire {CONFIG_INI_FILE}: {e}")
+    return config
+
+
+def load_json_config():
+    """Charge config.json s'il existe. Retourne {} sinon."""
+    if os.path.exists(CONFIG_JSON_FILE):
+        try:
+            with open(CONFIG_JSON_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"⚠️ Impossible de lire {CONFIG_JSON_FILE}: {e}")
+    return {}
+
+
+def resolve_vulncheck_api_key():
+    """Résout la clé VulnCheck, dans l'ordre : variable d'environnement
+    VULNCHECK_API_KEY > config.ini [api_keys] vulncheck_api_key >
+    config.json 'vulncheck_api_key'."""
+    if os.environ.get("VULNCHECK_API_KEY"):
+        return os.environ["VULNCHECK_API_KEY"]
+    ini_key = load_ini_config().get("api_keys", "vulncheck_api_key", fallback="").strip()
+    if ini_key:
+        return ini_key
+    return load_json_config().get("vulncheck_api_key") or None
 
 
 def fetch_vulncheck_kev():
     """Télécharge l'intégralité du KEV VulnCheck en parcourant la pagination."""
+    VULNCHECK_API_KEY = resolve_vulncheck_api_key()
     if not VULNCHECK_API_KEY:
         print(
-            "⚠️ VULNCHECK_API_KEY non configurée. Ignoré pour VulnCheck."
+            "⚠️ VULNCHECK_API_KEY non configurée (env, config.ini ou config.json). "
+            "Ignoré pour VulnCheck."
         )
         return None
 

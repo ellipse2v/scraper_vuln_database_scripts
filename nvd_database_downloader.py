@@ -39,11 +39,12 @@ Modes:
                               "keep an already-populated DT instance fresh" mode.
 
 API key (optional but strongly recommended -- raises the rate limit from 5 to 50
-requests per 30s): put it in config.json (see config.json.example), or pass
---api-key, or set the NVD_API_KEY environment variable.
+requests per 30s): pass --api-key, set the NVD_API_KEY environment variable, or put
+it in config.ini (see config.ini.example) or config.json (see config.json.example).
 """
 
 import argparse
+import configparser
 import json
 import logging
 import os
@@ -60,6 +61,7 @@ CONST_API_MAX_DATE_RANGE_DAYS = 120  # Hard limit enforced by the NVD API itself
 CONST_FIRST_CVE_YEAR = 2002
 
 CONFIG_FILE = "./config.json"
+CONFIG_INI_FILE = "./config.ini"
 OUTPUT_DIR = "./download/nvd"
 ZIP_STATE_FILE = f"{OUTPUT_DIR}/zip_feed_state.json"
 
@@ -77,23 +79,42 @@ def load_config():
     return {}
 
 
-def resolve_api_key(args, config):
+def load_ini_config():
+    """Load config.ini if present. Returns an empty ConfigParser if missing -- all keys are optional."""
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_INI_FILE):
+        try:
+            config.read(CONFIG_INI_FILE, encoding="utf-8")
+        except configparser.Error as e:
+            logging.warning(f"Failed to load {CONFIG_INI_FILE}: {e}")
+    return config
+
+
+def resolve_api_key(args, config, ini_config):
+    """Resolve the NVD API key, in order: --api-key CLI flag > NVD_API_KEY env var >
+    config.ini [api_keys] nvd_api_key > config.json 'nvd_api_key'."""
     if args.api_key:
         return args.api_key
     if os.environ.get("NVD_API_KEY"):
         return os.environ["NVD_API_KEY"]
+    ini_key = ini_config.get("api_keys", "nvd_api_key", fallback="").strip()
+    if ini_key:
+        return ini_key
     if config.get("nvd_api_key"):
         return config["nvd_api_key"]
     return None
 
 
-def resolve_proxy(args, config):
-    """Resolve an explicit proxy override, in order: --proxy CLI flag > config.json 'proxy'
-    key. Returns None if neither is set -- the Session's default trust_env=True then keeps
-    consulting the usual HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment variables on its own, so
-    an unconfigured proxy is a no-op, not broken behavior."""
+def resolve_proxy(args, config, ini_config):
+    """Resolve an explicit proxy override, in order: --proxy CLI flag > config.ini [network]
+    proxy > config.json 'proxy' key. Returns None if none is set -- the Session's default
+    trust_env=True then keeps consulting the usual HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment
+    variables on its own, so an unconfigured proxy is a no-op, not broken behavior."""
     if args.proxy:
         return args.proxy
+    ini_proxy = ini_config.get("network", "proxy", fallback="").strip()
+    if ini_proxy:
+        return ini_proxy
     return config.get("proxy")
 
 
@@ -305,10 +326,10 @@ def main():
     parser.add_argument("--days", type=int, help="Number of days back to fetch (required for --mode days).")
     parser.add_argument("--force-full", action="store_true",
                          help="For --source zip: re-download every year, ignoring the local unchanged-check.")
-    parser.add_argument("--api-key", help="NVD API key (overrides config.json / NVD_API_KEY env var).")
+    parser.add_argument("--api-key", help="NVD API key (overrides NVD_API_KEY env var / config.ini / config.json).")
     parser.add_argument("--proxy",
                          help="Proxy URL for all outbound requests, e.g. http://user:pass@proxy.company.com:8080 "
-                              "(overrides config.json / HTTP_PROXY / HTTPS_PROXY)")
+                              "(overrides config.ini / config.json / HTTP_PROXY / HTTPS_PROXY)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
@@ -323,15 +344,16 @@ def main():
         parser.error("--source zip only supports --mode full (the yearly feeds are not date-filterable)")
 
     config = load_config()
-    proxy = resolve_proxy(args, config)
+    ini_config = load_ini_config()
+    proxy = resolve_proxy(args, config, ini_config)
     if proxy:
         SESSION.proxies.update({"http": proxy, "https": proxy})
 
-    api_key = resolve_api_key(args, config)
+    api_key = resolve_api_key(args, config, ini_config)
     if not api_key and args.source == "api":
         logging.warning(
             "No NVD API key configured -- proceeding unauthenticated (5 req/30s, much slower). "
-            "See config.json.example.")
+            "See config.ini.example / config.json.example.")
 
     if args.mode == "full" and args.source == "zip":
         download_zip_feeds(force_full=args.force_full)
