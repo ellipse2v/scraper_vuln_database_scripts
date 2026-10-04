@@ -31,6 +31,9 @@ CONST_URL_GLOBAL_MODIFIED = "https://storage.googleapis.com/osv-vulnerabilities/
 list_ecosystem = []
 
 OUTPUT_DIR = "./download/osv"
+# All {ecosystem}.zip archives (the files to copy to the Dependency-Track machine) live here,
+# apart from the bookkeeping files (timestamps.json, modified_id.csv, ...).
+ZIP_DIR = f"{OUTPUT_DIR}/zip"
 CONFIG_FILE = "./config.json"
 
 # File to track last download timestamps / per-ecosystem incremental state
@@ -211,14 +214,26 @@ def write_delta_zip(zip_path, id_to_content):
     """Write a zip archive containing one `{vuln_id}.json` entry per advisory. DT's offline OSV
     reader (ZipOsvAdvisorySource) reads every non-directory `*.json` entry in the archive
     independently, regardless of whether the archive holds a full or partial advisory set -- so
-    this is format-compatible with the official `all.zip` files DT also accepts."""
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for vuln_id, content in id_to_content.items():
-            zf.writestr(f"{vuln_id}.json", content)
+    this is format-compatible with the official `all.zip` files DT also accepts.
+
+    If `zip_path` still exists (not yet consumed/copied since the previous run), its entries are
+    kept and only the changed advisories are replaced, so a delta never overwrites advisories
+    that have not been delivered yet."""
+    new_entries = {f"{vuln_id}.json": content for vuln_id, content in id_to_content.items()}
+    tmp_path = f"{zip_path}.tmp"
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        if os.path.exists(zip_path):
+            with zipfile.ZipFile(zip_path, "r") as previous:
+                for info in previous.infolist():
+                    if info.filename not in new_entries:
+                        zf.writestr(info, previous.read(info))
+        for name, content in new_entries.items():
+            zf.writestr(name, content)
+    os.replace(tmp_path, zip_path)
 
 
 def download_full_ecosystem_zip(ecosystem):
-    """Download the complete `all.zip` for `ecosystem` into `{OUTPUT_DIR}/{ecosystem}.zip`
+    """Download the complete `all.zip` for `ecosystem` into `{ZIP_DIR}/{ecosystem}.zip`
     (the exact filename DT's offline OSV reader looks for). Returns True on success."""
     url = f"{CONST_URL_OSV_BASE}{urllib.parse.quote(ecosystem, encoding='utf-8').replace(' ', '%20')}/all.zip"
 
@@ -226,8 +241,8 @@ def download_full_ecosystem_zip(ecosystem):
         response = SESSION.get(url)
         response.raise_for_status()
 
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        with open(f"{OUTPUT_DIR}/{ecosystem}.zip", "wb") as fichier:
+        os.makedirs(ZIP_DIR, exist_ok=True)
+        with open(f"{ZIP_DIR}/{ecosystem}.zip", "wb") as fichier:
             fichier.write(response.content)
 
         logging.info(f"✓ Downloaded full {ecosystem} database")
@@ -245,7 +260,7 @@ def process_ecosystem(ecosystem, eco_state, force_full):
     """Download whatever DT needs for `ecosystem` -- a full archive on first run, `--force-full`,
     or when there are too many changes to fetch individually; otherwise just the advisories that
     changed since the last successful run, packaged the same way. Both cases write to
-    `{OUTPUT_DIR}/{ecosystem}.zip`, since that is the single, fixed filename DT's offline OSV
+    `{ZIP_DIR}/{ecosystem}.zip`, since that is the single, fixed filename DT's offline OSV
     reader looks for (see OsvVulnDataSource#openOfflineArchive) -- there is no "dated snapshot"
     naming convention for OSV like there is for KEV/EPSS/NVD.
 
@@ -301,8 +316,8 @@ def process_ecosystem(ecosystem, eco_state, force_full):
         return None
 
     try:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        write_delta_zip(f"{OUTPUT_DIR}/{ecosystem}.zip", advisories)
+        os.makedirs(ZIP_DIR, exist_ok=True)
+        write_delta_zip(f"{ZIP_DIR}/{ecosystem}.zip", advisories)
     except IOError as e:
         logging.error(f"Failed to write delta archive for {ecosystem}: {e}")
         return None

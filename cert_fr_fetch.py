@@ -55,8 +55,12 @@ def resolve_proxy(args, config: dict):
     return config.get("proxy")
 
 
-def list_references(bulletin_type: str, delay: float) -> list[str]:
-    """Walks the listing pages and returns every reference found."""
+def list_references(bulletin_type: str, delay: float, known: set[str] | None = None) -> list[str]:
+    """Walks the listing pages and returns every reference found.
+
+    The listing is published newest first, so when `known` (references already in current/) is
+    given, the walk stops at the first page holding no unknown reference: everything older has
+    already been downloaded. Pass known=None to walk every page (first run / --full)."""
     references = []
     page = 1
     while True:
@@ -70,6 +74,9 @@ def list_references(bulletin_type: str, delay: float) -> list[str]:
             break
         references.extend(found)
         print(f"[{bulletin_type}] page {page}: {len(found)} reference(s)")
+        if known is not None and all(ref in known for ref in found):
+            print(f"[{bulletin_type}] page {page} already fully downloaded, stopping listing")
+            break
         page += 1
         time.sleep(delay)
     return sorted(set(references))
@@ -80,6 +87,17 @@ def fetch_bulletin(bulletin_type: str, reference: str) -> dict:
     resp = SESSION.get(url, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def load_failed(path: Path) -> set[str]:
+    """References whose download failed on a previous run -- retried directly next run, since an
+    incremental listing walk may stop before reaching their page."""
+    if path.exists():
+        try:
+            return set(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return set()
 
 
 def reset_new_dir(new_dir: Path) -> None:
@@ -93,8 +111,12 @@ def reset_new_dir(new_dir: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default="bulletins", help="Output directory")
+    parser.add_argument("--output", default="download/certfr", help="Output directory")
     parser.add_argument("--types", default="avis,alerte", help="Types to fetch (avis,alerte)")
+    parser.add_argument("--full", action="store_true",
+                         help="Walk every listing page instead of stopping at the first page that "
+                              "is already fully downloaded (bulletins already in current/ are "
+                              "still never re-downloaded)")
     parser.add_argument("--delay", type=float, default=0.3, help="Delay between requests (s)")
     parser.add_argument("--proxy",
                          help="Proxy URL for all outbound requests, e.g. http://user:pass@proxy.company.com:8080 "
@@ -116,10 +138,19 @@ def main():
         current_dir.mkdir(parents=True, exist_ok=True)
         reset_new_dir(new_dir)
 
-        references = list_references(bulletin_type, args.delay)
+        known = {f.stem for f in current_dir.glob("*.json")}
+        failed_path = type_dir / "failed.json"
+        previously_failed = load_failed(failed_path)
+        # Stopping early is only safe once a complete walk has finished at least once: an
+        # interrupted first run could otherwise leave gaps behind already-known pages.
+        complete_marker = type_dir / "listing_complete"
+        incremental = complete_marker.exists() and not args.full
+        references = list_references(bulletin_type, args.delay, known if incremental else None)
+        references = sorted(set(references) | previously_failed)
         print(f"[{bulletin_type}] {len(references)} bulletin(s) found")
 
         new_count = 0
+        failed = set()
         for reference in references:
             dest = current_dir / f"{reference}.json"
             if dest.exists():
@@ -128,6 +159,7 @@ def main():
                 data = fetch_bulletin(bulletin_type, reference)
             except requests.RequestException as exc:
                 print(f"[{bulletin_type}] failed {reference}: {exc}")
+                failed.add(reference)
                 continue
             payload = json.dumps(data, ensure_ascii=False, indent=2)
             dest.write_text(payload, encoding="utf-8")
@@ -136,7 +168,10 @@ def main():
             print(f"[{bulletin_type}] saved {reference}")
             time.sleep(args.delay)
 
-        print(f"[{bulletin_type}] {new_count} new bulletin(s) this run")
+        failed_path.write_text(json.dumps(sorted(failed), indent=2), encoding="utf-8")
+        complete_marker.touch()
+        print(f"[{bulletin_type}] {new_count} new bulletin(s) this run"
+              + (f", {len(failed)} failed (retried next run)" if failed else ""))
 
 
 if __name__ == "__main__":

@@ -37,6 +37,9 @@ Modes:
                               (chunked into <=120-day windows, the API's own limit),
                               merged into a single dated output file -- the delta/
                               "keep an already-populated DT instance fresh" mode.
+  --mode update               Fetch only CVEs modified since the last successful API run
+                              (full/days/update), so nothing already fetched is fetched
+                              again. Needs one prior API run (or --days N as a fallback).
 
 API key (optional but strongly recommended -- raises the rate limit from 5 to 50
 requests per 30s): put it in config.json (see config.json.example), or pass
@@ -62,6 +65,7 @@ CONST_FIRST_CVE_YEAR = 2002
 CONFIG_FILE = "./config.json"
 OUTPUT_DIR = "./download/nvd"
 ZIP_STATE_FILE = f"{OUTPUT_DIR}/zip_feed_state.json"
+API_STATE_FILE = f"{OUTPUT_DIR}/api_state.json"
 
 SESSION = requests.Session()
 
@@ -158,23 +162,64 @@ def fetch_api_range(api_key, extra_params=None, label="full catalog"):
     }
 
 
+def load_api_state():
+    if os.path.exists(API_STATE_FILE):
+        try:
+            with open(API_STATE_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logging.warning(f"Failed to load {API_STATE_FILE}: {e}")
+    return {}
+
+
+def save_api_state(run_start):
+    """Record the start time of a successful API run as the watermark for --mode update.
+    The start (not end) time is used so CVEs modified during the run are picked up again."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(API_STATE_FILE, "w") as f:
+        json.dump({"last_success": run_start.isoformat()}, f, indent=2)
+
+
 def download_full_via_api(api_key):
     logging.info("Downloading full NVD catalog via API (no date filter)")
+    run_start = datetime.now(timezone.utc)
     result = fetch_api_range(api_key, label="full catalog")
     write_output(result, "nvd_full_vulnerabilities")
+    save_api_state(run_start)
 
 
 def download_days_via_api(api_key, days):
+    logging.info(f"Downloading NVD CVEs modified in the last {days} day(s) via API")
+    end = datetime.now(timezone.utc)
+    download_modified_between(api_key, end - timedelta(days=days), end, f"nvd_modified_{days}d")
+    save_api_state(end)
+
+
+def download_update_via_api(api_key, fallback_days=None):
+    """Fetch only CVEs modified since the last successful API run."""
+    last_success = load_api_state().get("last_success")
+    end = datetime.now(timezone.utc)
+    if last_success:
+        start = datetime.fromisoformat(last_success)
+    elif fallback_days:
+        logging.info(f"No previous API run recorded; falling back to the last {fallback_days} day(s)")
+        start = end - timedelta(days=fallback_days)
+    else:
+        raise SystemExit(
+            f"No previous API run recorded in {API_STATE_FILE}. Run --mode full or "
+            "--mode days --days N once first, or pass --days N as a fallback.")
+    logging.info(f"Downloading NVD CVEs modified since {start.isoformat()} via API")
+    download_modified_between(api_key, start, end, "nvd_update",
+                              stamp=end.strftime("%Y-%m-%dT%H%M%S"))
+    save_api_state(end)
+
+
+def download_modified_between(api_key, start, end, name_prefix, stamp=None):
     """
     NVD restricts a single lastMod date-range query to at most 120 days, so a
     request for more than that is chunked into consecutive <=120-day windows and
     merged into one output file.
     """
-    logging.info(f"Downloading NVD CVEs modified in the last {days} day(s) via API")
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
-
     all_vulnerabilities = []
     meta = {}
     window_start = start
@@ -182,11 +227,10 @@ def download_days_via_api(api_key, days):
         window_end = min(window_start + timedelta(days=CONST_API_MAX_DATE_RANGE_DAYS), end)
         # NVD requires the colon-separated ISO-8601 offset ("+00:00"); Python's %z produces
         # "+0000", which the API rejects outright with a 404. window_start/window_end are always
-        # UTC (derived from datetime.now(timezone.utc)), so the offset is hardcoded rather than
-        # formatted from the datetime's own tzinfo.
+        # UTC, so the offset is hardcoded rather than formatted from the datetime's own tzinfo.
         params = {
-            "lastModStartDate": window_start.strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
-            "lastModEndDate": window_end.strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+            "lastModStartDate": window_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+            "lastModEndDate": window_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         }
         chunk = fetch_api_range(
             api_key, extra_params=params,
@@ -204,12 +248,12 @@ def download_days_via_api(api_key, days):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "vulnerabilities": all_vulnerabilities,
     }
-    write_output(result, f"nvd_modified_{days}d")
+    write_output(result, name_prefix, stamp)
 
 
-def write_output(result, name_prefix):
+def write_output(result, name_prefix, stamp=None):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = stamp or datetime.now().strftime("%Y-%m-%d")
     out_path = f"{OUTPUT_DIR}/{name_prefix}-{date_str}.json"
     with open(out_path, "w") as f:
         json.dump(result, f)
@@ -297,12 +341,15 @@ def download_zip_feeds(force_full):
 
 def main():
     parser = argparse.ArgumentParser(description="NVD CVE database downloader")
-    parser.add_argument("--mode", choices=["full", "days"], required=True,
-                         help="'full': entire catalog. 'days': only CVEs modified in the last N days.")
+    parser.add_argument("--mode", choices=["full", "days", "update"], required=True,
+                         help="'full': entire catalog. 'days': only CVEs modified in the last N days. "
+                              "'update': only CVEs modified since the last successful API run.")
     parser.add_argument("--source", choices=["api", "zip"], default="api",
                          help="'api': NVD API 2.0 (works for both modes). "
                               "'zip': official yearly feed files (only valid with --mode full).")
-    parser.add_argument("--days", type=int, help="Number of days back to fetch (required for --mode days).")
+    parser.add_argument("--days", type=int,
+                         help="Number of days back to fetch (required for --mode days; fallback for "
+                              "--mode update when no previous API run is recorded).")
     parser.add_argument("--force-full", action="store_true",
                          help="For --source zip: re-download every year, ignoring the local unchanged-check.")
     parser.add_argument("--api-key", help="NVD API key (overrides config.json / NVD_API_KEY env var).")
@@ -319,7 +366,7 @@ def main():
 
     if args.mode == "days" and not args.days:
         parser.error("--mode days requires --days N")
-    if args.mode == "days" and args.source == "zip":
+    if args.mode in ("days", "update") and args.source == "zip":
         parser.error("--source zip only supports --mode full (the yearly feeds are not date-filterable)")
 
     config = load_config()
@@ -337,8 +384,10 @@ def main():
         download_zip_feeds(force_full=args.force_full)
     elif args.mode == "full":
         download_full_via_api(api_key)
-    else:
+    elif args.mode == "days":
         download_days_via_api(api_key, args.days)
+    else:
+        download_update_via_api(api_key, args.days)
 
     logging.info("Done")
 

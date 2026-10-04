@@ -7,6 +7,36 @@ same JSON/ZIP shapes DT already knows how to read.
 - `nvd_database_downloader.py` -- NIST NVD, full catalog or recent changes
 - `cert_fr_fetch.py` -- CERT-FR (French CERT) advisories and alerts
 - `debian_security_fetch.py` -- Debian Security Advisories (DSA) and Debian LTS Advisories (DLA)
+- `kevDownloader.py` -- Known Exploited Vulnerabilities catalogs: CISA KEV, ENISA EUVD KEV, VulnCheck KEV
+
+## Output Layout
+
+Every script writes under `./download/`, one directory per source:
+
+```
+download/
+├── certfr/      # cert_fr_fetch.py           (avis/, alerte/ -> current/ + new/)
+├── debian/      # debian_security_fetch.py   (dsa/, dla/   -> current/ + new/)
+├── nvd/         # nvd_database_downloader.py
+├── osv/         # osv_database_downloader.py (zip/ holds every {ecosystem}.zip to copy)
+├── cisakev/     # kevDownloader.py
+├── keveuvd/     # kevDownloader.py
+└── vulncheck/   # kevDownloader.py
+```
+
+Nothing already downloaded is downloaded again:
+
+- **certfr / debian**: `current/` always holds 100% of the advisories ever fetched; a reference
+  already there is never re-fetched. `new/` is emptied at the start of every run and only holds
+  what that run added -- it is safe to delete its content at any time (never delete `current/`,
+  that is what tells the script what it already has).
+- **nvd**: `--source zip` skips years whose `.meta` is unchanged; `--mode update` only asks the
+  API for CVEs modified since the last successful API run.
+- **osv**: per-ecosystem watermark, only changed advisories are fetched after the first run.
+- **cisakev / keveuvd**: full dumps (the sources offer nothing finer), fetched with a conditional
+  request (`ETag` / `Last-Modified`) so an unchanged catalog is not re-downloaded.
+- **vulncheck**: the API has no conditional request, so the catalog is re-paginated each run;
+  the file is only rewritten if its content changed.
 
 ## Enterprise Proxy
 
@@ -29,15 +59,17 @@ python debian_security_fetch.py --proxy http://user:pass@proxy.company.com:8080
 
 ## API Keys (`kevDownloader.py`)
 
-`kevDownloader.py` downloads the VulnCheck KEV (requires an API key) and the ENISA EUVD KEV dump.
-The VulnCheck key is resolved in this order:
+`kevDownloader.py` downloads the CISA KEV catalog
+(`download/cisakev/known_exploited_vulnerabilities.json`), the ENISA EUVD KEV dump
+(`download/keveuvd/euvd_kev.json`) and the VulnCheck KEV (`download/vulncheck/vulncheck_kev.json`,
+requires an API key). The VulnCheck key is resolved in this order:
 
 1. `VULNCHECK_API_KEY` environment variable
 2. `vulncheck_api_key` in `./config.json` (see `config.json.example`)
 
 `proxy` in `./config.json` is honored as well (see [Enterprise Proxy](#enterprise-proxy)).
 
-If none is set, VulnCheck is skipped and only EUVD is downloaded.
+If none is set, VulnCheck is skipped and only CISA and EUVD are downloaded.
 
 ---
 
@@ -85,9 +117,10 @@ download/osv/
 ├── osv_ecosystems.txt          # List of all available ecosystems
 ├── global_modified_id.csv      # Global list of modified vulnerabilities
 ├── timestamps.json             # Per-ecosystem incremental state
-├── PyPI.zip                    # PyPI advisories: full DB on first run, changed-only afterwards
-├── npm.zip                     # npm advisories: full DB on first run, changed-only afterwards
-├── ...                         # Other ecosystem ZIP files
+├── zip/                        # Everything to copy to the Dependency-Track machine
+│   ├── PyPI.zip                # PyPI advisories: full DB on first run, changed-only afterwards
+│   ├── npm.zip                 # npm advisories: full DB on first run, changed-only afterwards
+│   └── ...                     # Other ecosystem ZIP files
 ├── PyPI/                       # Per-ecosystem directories
 │   └── modified_id.csv         # PyPI-specific modified vulnerabilities
 ├── npm/
@@ -97,7 +130,13 @@ download/osv/
 
 `{ecosystem}.zip` is always named exactly that (never a dated/versioned filename) --
 Dependency-Track's offline OSV reader looks for that fixed name and deletes it once it has
-successfully mirrored its contents, so the script naturally regenerates it fresh each run.
+successfully mirrored its contents. All of them live in `download/osv/zip/`, so that single
+directory is what you copy to the target machine.
+
+If a `zip/{ecosystem}.zip` from a previous run is still there (not yet copied/consumed), a new
+incremental run merges the changed advisories into it instead of overwriting it, so no advisory
+is lost between two copies. Once copied, delete the zips from `zip/`: the next run will only
+contain what changed since.
 
 ## Incremental Updates & Timestamp Tracking
 
@@ -120,6 +159,7 @@ while already-tracked ecosystems keep receiving true incremental updates.
 - If more than 250 advisories changed, falls back to a full `all.zip` download instead (matching
   the threshold Dependency-Track itself uses for incremental mirroring) -- fetching 250+
   individual files is more expensive than one archive
+- If a previous `{ecosystem}.zip` has not been consumed yet, the changed advisories are merged into it
 - If nothing changed, no zip is (re)written, but the watermark still advances
 
 ### modified_id.csv Files
@@ -143,7 +183,8 @@ Downloads NVD CVE data, always in the same JSON shape as the NVD API 2.0 respons
 |------|--------|---------------|
 | `--mode full --source zip` (recommended for a first bootstrap) | Official yearly `nvdcve-2.0-<year>.json.zip` feeds | Fastest full-history download. Extracted directly under NVD's own per-year filenames (`nvdcve-2.0-<year>.json`) so DT's offline mode reads them natively, no renaming or merging. Uses each feed's `.meta` file to skip years unchanged since the last run (or `--force-full` to re-download everything). |
 | `--mode full --source api` | NVD API 2.0, paginated | Full catalog (2002 -> now) via the REST API. Works with zero other setup, but slow and rate-limited. |
-| `--mode days --days N` | NVD API 2.0, paginated | Only CVEs modified in the last N days (chunked into <=120-day windows, the API's own limit). The "keep an already-populated DT instance fresh" mode. Output is a single dated file: `./download/nvd/nvd_modified_<N>d-<date>.json`. |
+| `--mode days --days N` | NVD API 2.0, paginated | Only CVEs modified in the last N days (chunked into <=120-day windows, the API's own limit). Output is a single dated file: `./download/nvd/nvd_modified_<N>d-<date>.json`. |
+| `--mode update` (recommended for scheduled runs) | NVD API 2.0, paginated | Only CVEs modified since the last successful API run (`full`, `days` or `update`), recorded in `download/nvd/api_state.json` -- nothing already fetched is fetched again, whatever the interval between runs. Needs one prior API run, or `--days N` as a fallback for the very first one. Output: `./download/nvd/nvd_update-<date>T<time>.json`. |
 
 ## Usage
 
@@ -160,6 +201,9 @@ python nvd_database_downloader.py --mode full --source api
 # Keep a running instance fresh: CVEs modified in the last 2 days
 python nvd_database_downloader.py --mode days --days 2
 
+# Scheduled runs: only what changed since the previous run (falls back to 2 days the first time)
+python nvd_database_downloader.py --mode update --days 2
+
 # Enable debug logging
 python nvd_database_downloader.py --mode days --days 2 --debug
 ```
@@ -167,7 +211,7 @@ python nvd_database_downloader.py --mode days --days 2 --debug
 ## API Key
 
 Optional but strongly recommended: raises the NVD API rate limit from 5 to 50 requests per 30s
-(`--mode full --source api` and `--mode days` both use the API; `--mode full --source zip` does
+(`--mode full --source api`, `--mode days` and `--mode update` use the API; `--mode full --source zip` does
 not need a key at all). Resolved in this order:
 
 1. `--api-key` CLI flag
@@ -184,10 +228,12 @@ not need a key at all). Resolved in this order:
 ```
 download/nvd/
 ├── zip_feed_state.json          # Per-year lastModifiedDate, used to skip unchanged years
+├── api_state.json               # Last successful API run, watermark for --mode update
 ├── nvdcve-2.0-2002.json         # --source zip: one file per year, NVD's own naming
 ├── nvdcve-2.0-2003.json
 ├── ...
-└── nvd_modified_2d-2026-07-25.json   # --mode days: one dated file per run
+├── nvd_modified_2d-2026-07-25.json   # --mode days: one dated file per run
+└── nvd_update-2026-07-25T061500.json # --mode update: one timestamped file per run
 ```
 
 ---
@@ -209,27 +255,40 @@ python cert_fr_fetch.py --types avis --output /path/to/bulletins
 
 # Slower crawl, gentler on the server
 python cert_fr_fetch.py --delay 1.0
+
+# Walk the whole listing again (e.g. to pick up anything missed); existing files are still skipped
+python cert_fr_fetch.py --full
 ```
 
 ### Command Line Options
 
-- `--output`: Output directory (default: `bulletins`)
+- `--output`: Output directory (default: `download/certfr`)
 - `--types`: Comma-separated bulletin types to fetch (default: `avis,alerte`)
+- `--full`: Walk every listing page instead of stopping at the first already-downloaded page
 - `--delay`: Delay between requests in seconds (default: `0.3`)
 - `--proxy`: Proxy URL for all outbound requests (see [Enterprise Proxy](#enterprise-proxy))
 
 ## Incremental Updates
 
-Each run lists every bulletin currently published for a type, then skips any reference already
-present in that type's `current/` directory -- so a daily run only downloads bulletins that are
-actually new. There is no separate timestamp/state file: the presence of the file itself is the
-watermark.
+A reference already present in a type's `current/` directory is never re-fetched: the presence
+of the file itself is the watermark.
+
+The listing is published newest first, so after the first complete walk (recorded by a
+`listing_complete` marker), each run stops paging at the first listing page whose references are
+all already in `current/` -- a daily run typically reads one or two listing pages, not hundreds.
+Bulletins whose download failed are recorded in `failed.json` and retried directly on the next
+run. `--full` forces a complete walk (still without re-downloading anything already there).
+
+Revisions of an already-downloaded bulletin (same reference, updated content) are not
+re-fetched.
 
 ## Output Structure
 
 ```
-bulletins/
+download/certfr/
 ├── avis/
+│   ├── listing_complete         # A full listing walk has completed at least once
+│   ├── failed.json              # References to retry next run
 │   ├── current/                 # Every avis ever downloaded (grows over time)
 │   │   ├── CERTFR-2026-AVI-0001.json
 │   │   └── CERTFR-2026-AVI-0002.json
@@ -273,11 +332,10 @@ python debian_security_fetch.py --proxy http://user:pass@proxy.company.com:8080
 
 ### Command Line Options
 
-- `--output`: Output directory (default: `debian`)
+- `--output`: Output directory (default: `download/debian`)
 - `--types`: Comma-separated advisory types to fetch (default: `dsa,dla`)
 - `--days`: Only keep advisories published in the last N days (default: no limit, full history).
-  The upstream list file is always fetched in full either way -- it's one small file, not worth
-  optimizing away -- this only limits what gets written to `current/`/`new/`.
+  This only limits what gets written to `current/`/`new/`.
 - `--proxy`: Proxy URL for all outbound requests (see [Enterprise Proxy](#enterprise-proxy))
 
 ## Incremental Updates
@@ -287,11 +345,15 @@ re-parsed, so a daily run only writes what's actually new. There is no separate 
 file -- the presence of the file itself is the watermark. A revised advisory gets a new ID
 (`DSA-6455-2` replacing `DSA-6455-1`) and is naturally treated as new, not skipped as a duplicate.
 
+The list file itself is fetched with a conditional request (`ETag` / `Last-Modified`, kept in
+`<type>/http_state.json`): if it has not changed since the last run, it is not downloaded again.
+
 ## Output Structure
 
 ```
-debian/
+download/debian/
 ├── dsa/
+│   ├── http_state.json          # ETag / Last-Modified of the last fetched list
 │   ├── current/                 # Every DSA ever downloaded (grows over time)
 │   │   ├── DSA-6455-1.json
 │   │   └── DSA-6454-1.json
