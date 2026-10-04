@@ -87,10 +87,31 @@ def resolve_proxy(args, config: dict):
     return config.get("proxy")
 
 
-def fetch_list(advisory_type: str) -> str:
-    resp = SESSION.get(LIST_URL[advisory_type], timeout=60)
+def fetch_list(advisory_type: str, state_path: Path | None) -> tuple[str | None, dict]:
+    """Fetches the upstream list file with a conditional request (If-None-Match /
+    If-Modified-Since). Returns (None, {}) if the server says it is unchanged since the last run
+    (HTTP 304) -- nothing to re-download or re-parse then. Otherwise returns (text, new_state);
+    the caller saves new_state only once every advisory has been written, so an interrupted run
+    is fully redone rather than skipped. With state_path=None the request is unconditional."""
+    state = {}
+    if state_path is not None and state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            state = {}
+    headers = {}
+    if state.get("etag"):
+        headers["If-None-Match"] = state["etag"]
+    if state.get("last_modified"):
+        headers["If-Modified-Since"] = state["last_modified"]
+    resp = SESSION.get(LIST_URL[advisory_type], headers=headers, timeout=60)
+    if resp.status_code == 304:
+        return None, {}
     resp.raise_for_status()
-    return resp.text
+    return resp.text, {
+        "etag": resp.headers.get("ETag"),
+        "last_modified": resp.headers.get("Last-Modified"),
+    }
 
 
 def parse_list(text: str, advisory_type: str) -> list[dict]:
@@ -180,7 +201,7 @@ def reset_new_dir(new_dir: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default="debian", help="Output directory")
+    parser.add_argument("--output", default="download/debian", help="Output directory")
     parser.add_argument("--types", default="dsa,dla", help="Advisory types to fetch (dsa,dla)")
     parser.add_argument("--days", type=int, default=None,
                          help="Only keep advisories published in the last N days (default: no "
@@ -211,10 +232,20 @@ def main():
         current_dir.mkdir(parents=True, exist_ok=True)
         reset_new_dir(new_dir)
 
+        # A --days run only writes part of the list, so it must neither use nor record the
+        # "unchanged since last run" state: a later full run would otherwise get a 304 and
+        # never write the older advisories.
+        state_path = type_dir / "http_state.json"
+        if args.days is not None:
+            state_path.unlink(missing_ok=True)
+            state_path = None
         try:
-            text = fetch_list(advisory_type)
+            text, new_state = fetch_list(advisory_type, state_path)
         except requests.RequestException as exc:
             print(f"[{advisory_type}] failed to fetch list: {exc}")
+            continue
+        if text is None:
+            print(f"[{advisory_type}] upstream list unchanged since last run, nothing new")
             continue
 
         advisories = parse_list(text, advisory_type)
@@ -243,6 +274,8 @@ def main():
             (new_dir / f"{advisory['id']}.json").write_text(payload, encoding="utf-8")
             new_count += 1
 
+        if state_path is not None:
+            state_path.write_text(json.dumps(new_state, indent=2), encoding="utf-8")
         print(f"[{advisory_type}] {new_count} new advisor(y/ies) this run")
 
 

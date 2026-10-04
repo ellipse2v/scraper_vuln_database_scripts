@@ -22,6 +22,19 @@ import urllib.parse
 import urllib.request
 
 CONFIG_FILE = "./config.json"
+DOWNLOAD_DIR = "./download"
+
+CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+EUVD_KEV_URL = "https://euvdservices.enisa.europa.eu/api/kev/dump"
+
+CISA_KEV_FILE = f"{DOWNLOAD_DIR}/cisakev/known_exploited_vulnerabilities.json"
+EUVD_KEV_FILE = f"{DOWNLOAD_DIR}/keveuvd/euvd_kev.json"
+VULNCHECK_KEV_FILE = f"{DOWNLOAD_DIR}/vulncheck/vulncheck_kev.json"
+
+DEFAULT_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+}
 
 
 def load_config():
@@ -65,9 +78,8 @@ def fetch_vulncheck_kev(api_key):
 
     base_url = "https://api.vulncheck.com/v3/index/vulncheck-kev"
     headers = {
-        "Accept": "application/json",
+        **DEFAULT_HEADERS,
         "Authorization": f"Bearer {api_key}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     }
 
     all_data = []
@@ -105,31 +117,84 @@ def fetch_vulncheck_kev(api_key):
 
             page += 1
 
+        # En cas d'erreur, on ne renvoie rien : sauvegarder un catalogue partiel
+        # écraserait le fichier complet du passage précédent.
         except urllib.error.HTTPError as e:
             print(f"❌ Erreur HTTP sur VulnCheck ({e.code}): {e.reason}")
-            break
+            return None
         except Exception as e:
             print(f"❌ Erreur réseau ou JSON sur VulnCheck: {e}")
-            break
+            return None
 
     return all_data
 
 
-def fetch_simple_json(url, headers):
-    """Télécharge un fichier JSON simple (ex: EUVD ENISA)."""
+def load_http_state(output_path):
+    """Charge les en-têtes ETag/Last-Modified mémorisés lors du dernier téléchargement."""
+    state_path = os.path.join(os.path.dirname(output_path), "http_state.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def save_http_state(output_path, state):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    state_path = os.path.join(os.path.dirname(output_path), "http_state.json")
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def fetch_json_if_changed(url, output_path):
+    """Télécharge un dump JSON complet (CISA KEV, EUVD) avec une requête conditionnelle
+    (If-None-Match / If-Modified-Since) : si le serveur répond 304, le fichier local est
+    déjà à jour et rien n'est retéléchargé. Retourne (data, state) ou (None, None)."""
     print(f"🚀 Téléchargement depuis {url}...")
+    headers = dict(DEFAULT_HEADERS)
+    state = load_http_state(output_path) if os.path.exists(output_path) else {}
+    if state.get("etag"):
+        headers["If-None-Match"] = state["etag"]
+    if state.get("last_modified"):
+        headers["If-Modified-Since"] = state["last_modified"]
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=60) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            new_state = {
+                "etag": response.headers.get("ETag"),
+                "last_modified": response.headers.get("Last-Modified"),
+            }
+            return data, new_state
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            print(f"✅ Inchangé depuis le dernier téléchargement : {output_path}")
+        else:
+            print(f"❌ Erreur HTTP sur {url} ({e.code}): {e.reason}")
     except Exception as e:
         print(f"❌ Erreur lors du téléchargement de {url}: {e}")
-        return None
+    return None, None
+
+
+def is_unchanged(data, output_path):
+    """True si `data` est identique au fichier déjà présent (pas de réécriture inutile)."""
+    if not os.path.exists(output_path):
+        return False
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            return json.load(f) == data
+    except (json.JSONDecodeError, IOError):
+        return False
 
 
 def save_json(data, output_path):
     """Sauvegarde les données dans un fichier JSON."""
     if data is None:
+        return
+    if is_unchanged(data, output_path):
+        print(f"✅ Inchangé : {output_path}")
         return
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -141,28 +206,27 @@ def save_json(data, output_path):
     )
 
 
+def download_dump(url, output_path):
+    data, state = fetch_json_if_changed(url, output_path)
+    if data is not None:
+        save_json(data, output_path)
+        save_http_state(output_path, state)
+
+
 def main():
     config = load_config()
     configure_proxy(config)
 
-    # 1. Traitement de VulnCheck (paginé)
+    # 1. CISA KEV (dump complet)
+    download_dump(CISA_KEV_URL, CISA_KEV_FILE)
+
+    # 2. EUVD ENISA KEV (dump complet)
+    download_dump(EUVD_KEV_URL, EUVD_KEV_FILE)
+
+    # 3. VulnCheck KEV (paginé, pas de requête conditionnelle possible)
     vulncheck_data = fetch_vulncheck_kev(resolve_vulncheck_api_key(config))
     if vulncheck_data:
-        save_json(
-            vulncheck_data, "output/vulncheck/vulncheck_kev.json"
-        )
-
-    # 2. Traitement d'EUVD ENISA (dump simple)
-    euvd_headers = {
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    }
-    euvd_data = fetch_simple_json(
-        "https://euvdservices.enisa.europa.eu/api/kev/dump",
-        euvd_headers,
-    )
-    if euvd_data:
-        save_json(euvd_data, "output/euvd/euvd_kev.json")
+        save_json(vulncheck_data, VULNCHECK_KEV_FILE)
 
 
 if __name__ == "__main__":

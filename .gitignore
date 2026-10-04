@@ -1,7 +1,7 @@
 config.json
 download/
+__pycache__/
+# Legacy output locations (before everything moved under download/)
 bulletins
 debian/
-__pycache__/
-output/euvd/euvd_kev.json
-output/vulncheck/vulncheck_kev.json
+output/
