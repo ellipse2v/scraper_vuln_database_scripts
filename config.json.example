@@ -1,4 +1,5 @@
 {
   "nvd_api_key": "your-nvd-api-key-here",
+  "vulncheck_api_key": "your-vulncheck-api-key-here",
   "proxy": "http://user:pass@proxy.company.com:8080"
 }

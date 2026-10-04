@@ -10,7 +10,7 @@ same JSON/ZIP shapes DT already knows how to read.
 
 ## Enterprise Proxy
 
-All three tools work identically behind a corporate proxy, and require no configuration at all
+All tools work identically behind a corporate proxy, and require no configuration at all
 when there isn't one. Outbound requests go through an explicit proxy override resolved in this
 order:
 
@@ -26,6 +26,18 @@ python nvd_database_downloader.py --mode full --source zip --proxy http://proxy.
 python cert_fr_fetch.py --proxy http://user:pass@proxy.company.com:8080
 python debian_security_fetch.py --proxy http://user:pass@proxy.company.com:8080
 ```
+
+## API Keys (`kevDownloader.py`)
+
+`kevDownloader.py` downloads the VulnCheck KEV (requires an API key) and the ENISA EUVD KEV dump.
+The VulnCheck key is resolved in this order:
+
+1. `VULNCHECK_API_KEY` environment variable
+2. `vulncheck_api_key` in `./config.json` (see `config.json.example`)
+
+`proxy` in `./config.json` is honored as well (see [Enterprise Proxy](#enterprise-proxy)).
+
+If none is set, VulnCheck is skipped and only EUVD is downloaded.
 
 ---
 

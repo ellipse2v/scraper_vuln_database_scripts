@@ -21,21 +21,52 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VULNCHECK_API_KEY = os.environ.get("VULNCHECK_API_KEY")
+CONFIG_FILE = "./config.json"
 
 
-def fetch_vulncheck_kev():
+def load_config():
+    """Charge config.json s'il existe. Retourne {} sinon -- toutes les clés sont optionnelles."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"⚠️ Impossible de lire {CONFIG_FILE}: {e}")
+    return {}
+
+
+def resolve_vulncheck_api_key(config):
+    """Résout la clé VulnCheck, dans l'ordre : variable d'environnement
+    VULNCHECK_API_KEY > config.json 'vulncheck_api_key'."""
+    if os.environ.get("VULNCHECK_API_KEY"):
+        return os.environ["VULNCHECK_API_KEY"]
+    return config.get("vulncheck_api_key") or None
+
+
+def configure_proxy(config):
+    """Applique la clé 'proxy' de config.json si présente. Sinon urllib continue
+    d'utiliser les variables HTTP_PROXY/HTTPS_PROXY/NO_PROXY habituelles."""
+    proxy = config.get("proxy")
+    if proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        )
+        urllib.request.install_opener(opener)
+
+
+def fetch_vulncheck_kev(api_key):
     """Télécharge l'intégralité du KEV VulnCheck en parcourant la pagination."""
-    if not VULNCHECK_API_KEY:
+    if not api_key:
         print(
-            "⚠️ VULNCHECK_API_KEY non configurée. Ignoré pour VulnCheck."
+            "⚠️ VULNCHECK_API_KEY non configurée (env ou config.json). "
+            "Ignoré pour VulnCheck."
         )
         return None
 
     base_url = "https://api.vulncheck.com/v3/index/vulncheck-kev"
     headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {VULNCHECK_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     }
 
@@ -111,8 +142,11 @@ def save_json(data, output_path):
 
 
 def main():
+    config = load_config()
+    configure_proxy(config)
+
     # 1. Traitement de VulnCheck (paginé)
-    vulncheck_data = fetch_vulncheck_kev()
+    vulncheck_data = fetch_vulncheck_kev(resolve_vulncheck_api_key(config))
     if vulncheck_data:
         save_json(
             vulncheck_data, "output/vulncheck/vulncheck_kev.json"
