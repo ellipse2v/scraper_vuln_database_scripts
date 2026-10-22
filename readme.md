@@ -8,6 +8,7 @@ same JSON/ZIP shapes DT already knows how to read.
 - `cert_fr_fetch.py` -- CERT-FR (French CERT) advisories and alerts
 - `debian_security_fetch.py` -- Debian Security Advisories (DSA) and Debian LTS Advisories (DLA)
 - `kevDownloader.py` -- Known Exploited Vulnerabilities catalogs: CISA KEV, ENISA EUVD KEV, VulnCheck KEV
+- `mskb_cvrf_fetch.py` -- Microsoft MSRC CVRF documents (KB -> CVE), for DT's MSKB source
 
 ## Output Layout
 
@@ -17,6 +18,7 @@ Every script writes under `./download/`, one directory per source:
 download/
 ├── certfr/      # cert_fr_fetch.py           (avis/, alerte/ -> current/ + new/)
 ├── debian/      # debian_security_fetch.py   (dsa/, dla/   -> current/ + new/)
+├── mskb/        # mskb_cvrf_fetch.py         (current/ + new/)
 ├── nvd/         # nvd_database_downloader.py
 ├── osv/         # osv_database_downloader.py (zip/ holds every {ecosystem}.zip to copy)
 ├── cisakev/     # kevDownloader.py
@@ -32,6 +34,8 @@ Nothing already downloaded is downloaded again:
   that is what tells the script what it already has).
 - **nvd**: `--source zip` skips years whose `.meta` is unchanged; `--mode update` only asks the
   API for CVEs modified since the last successful API run.
+- **mskb**: a document already in `current/` is never re-fetched (`--force-full` re-fetches
+  everything); `new/` holds what that run downloaded.
 - **osv**: per-ecosystem watermark, only changed advisories are fetched after the first run.
 - **cisakev / keveuvd**: full dumps (the sources offer nothing finer), fetched with a conditional
   request (`ETag` / `Last-Modified`) so an unchanged catalog is not re-downloaded.
@@ -397,3 +401,48 @@ written yet. The `dependency-track` repo's `vuln-data-source/certfr/` module (a 
 `CertFRModelConverter`) is the pattern this fork already uses for turning an offline-mirrored
 directory of JSON files into `VulnerableSoftware` rows -- a `vuln-data-source/debian/` module
 following the same shape is the next step.
+
+---
+
+# Microsoft MSRC CVRF Downloader (MSKB)
+
+Downloads the monthly MSRC CVRF documents (`cvrf_2018-Jan.xml`, ...) from
+`https://api.msrc.microsoft.com/cvrf/v3.0/`, as read by Dependency-Track's MSKB offline mirror
+(KB article -> CVE mapping).
+
+The MSRC API returns the same document as JSON or XML depending on the `Accept` header. A JSON
+answer saved as `.xml` is rejected by DT with `Content is not allowed in prolog`, so this script
+always asks for XML and checks that each answer is a CVRF XML document before writing it.
+
+## Usage
+
+```bash
+# Only the documents not downloaded yet
+python mskb_cvrf_fetch.py
+
+# Re-download every document (MSRC revises old months in place: same ID, new content)
+python mskb_cvrf_fetch.py --force-full
+
+# Only some documents
+python mskb_cvrf_fetch.py --ids 2018-Jan,2023-May
+
+python mskb_cvrf_fetch.py --proxy http://user:pass@proxy.company.com:8080
+```
+
+### Command Line Options
+
+- `--output`: Output directory (default: `download/mskb`)
+- `--ids`: Comma-separated document IDs (default: all)
+- `--force-full`: Re-download every document, even those already in `current/`
+- `--proxy`: Proxy URL for all outbound requests (see [Enterprise Proxy](#enterprise-proxy))
+
+## Output Structure
+
+```
+download/mskb/
+├── current/              # every document fetched so far (cvrf_<ID>.xml)
+└── new/                  # only what this run downloaded -- copy this to DT
+```
+
+DT deletes each file from its offline directory once its mappings are committed, and moves a file
+it cannot parse to an `error/` subdirectory.
