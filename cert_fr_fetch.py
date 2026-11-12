@@ -22,12 +22,16 @@ import json
 import os
 import re
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
 
 BASE_URL = "https://www.cert.ssi.gouv.fr"
 REF_RE = re.compile(r"/(avis|alerte)/(CERTFR-\d{4}-(?:AVI|ALE)-\d+)/")
+# Above this share of current/ missing from the listing, the listing is assumed truncated
+# (site glitch) rather than the bulletins withdrawn, and nothing is moved to removed/.
+MAX_REMOVED_RATIO = 0.05
 
 CONFIG_FILE = "./config.json"
 
@@ -100,6 +104,35 @@ def load_failed(path: Path) -> set[str]:
     return set()
 
 
+def needs_refresh(path: Path, cutoff: str) -> bool:
+    """True for a bulletin that may still be revised: last revision on or after `cutoff`
+    (YYYY-MM-DD), or an alert not closed yet. Avis never carry closed_at."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return True
+    dates = [r.get("revision_date") or "" for r in data.get("revisions") or []]
+    if dates and max(dates)[:10] >= cutoff:
+        return True
+    return path.parent.parent.name == "alerte" and data.get("closed_at") is None
+
+
+def move_removed(current_dir: Path, removed_dir: Path, listed: set[str]) -> None:
+    """Moves bulletins no longer in the site listing from current/ to removed/ (kept, never
+    deleted). Only called after a complete listing walk."""
+    files = sorted(current_dir.glob("*.json"))
+    gone = [f for f in files if f.stem not in listed]
+    if len(gone) > MAX_REMOVED_RATIO * len(files):
+        print(f"[{current_dir.parent.name}] WARNING: {len(gone)}/{len(files)} bulletin(s) missing "
+              f"from the listing (more than {MAX_REMOVED_RATIO:.0%}), listing probably "
+              f"incomplete: nothing moved to removed/")
+        return
+    for f in gone:
+        removed_dir.mkdir(parents=True, exist_ok=True)
+        f.replace(removed_dir / f.name)
+        print(f"[{current_dir.parent.name}] {f.stem} no longer listed, moved to {removed_dir}")
+
+
 def reset_new_dir(new_dir: Path) -> None:
     """Empty `new_dir` so it only ever holds this run's newly fetched bulletins."""
     if new_dir.exists():
@@ -117,6 +150,9 @@ def main():
                          help="Walk every listing page instead of stopping at the first page that "
                               "is already fully downloaded (bulletins already in current/ are "
                               "still never re-downloaded)")
+    parser.add_argument("--refresh-days", type=int, default=90,
+                         help="Re-fetch bulletins revised within this many days (and open alerts) "
+                              "to pick up revisions; a changed bulletin goes to new/ (default: 90)")
     parser.add_argument("--delay", type=float, default=0.3, help="Delay between requests (s)")
     parser.add_argument("--proxy",
                          help="Proxy URL for all outbound requests, e.g. http://user:pass@proxy.company.com:8080 "
@@ -135,6 +171,7 @@ def main():
         type_dir = output_dir / bulletin_type
         current_dir = type_dir / "current"
         new_dir = type_dir / "new"
+        removed_dir = type_dir / "removed"
         current_dir.mkdir(parents=True, exist_ok=True)
         reset_new_dir(new_dir)
 
@@ -145,8 +182,13 @@ def main():
         # interrupted first run could otherwise leave gaps behind already-known pages.
         complete_marker = type_dir / "listing_complete"
         incremental = complete_marker.exists() and not args.full
-        references = list_references(bulletin_type, args.delay, known if incremental else None)
-        references = sorted(set(references) | previously_failed)
+        listed = list_references(bulletin_type, args.delay, known if incremental else None)
+        # A complete walk lists every bulletin still published: anything else was withdrawn.
+        if not incremental and listed:
+            move_removed(current_dir, removed_dir, set(listed))
+        cutoff = (date.today() - timedelta(days=args.refresh_days)).isoformat()
+        to_refresh = sorted(f for f in current_dir.glob("*.json") if needs_refresh(f, cutoff))
+        references = sorted(set(listed) | previously_failed)
         print(f"[{bulletin_type}] {len(references)} bulletin(s) found")
 
         new_count = 0
@@ -168,9 +210,25 @@ def main():
             print(f"[{bulletin_type}] saved {reference}")
             time.sleep(args.delay)
 
+        updated_count = 0
+        print(f"[{bulletin_type}] checking {len(to_refresh)} recent bulletin(s) for revisions")
+        for dest in to_refresh:
+            try:
+                data = fetch_bulletin(bulletin_type, dest.stem)
+            except requests.RequestException as exc:
+                print(f"[{bulletin_type}] refresh failed {dest.stem}: {exc}")
+                continue
+            payload = json.dumps(data, ensure_ascii=False, indent=2)
+            if payload != dest.read_text(encoding="utf-8"):
+                dest.write_text(payload, encoding="utf-8")
+                (new_dir / dest.name).write_text(payload, encoding="utf-8")
+                updated_count += 1
+                print(f"[{bulletin_type}] updated {dest.stem}")
+            time.sleep(args.delay)
+
         failed_path.write_text(json.dumps(sorted(failed), indent=2), encoding="utf-8")
         complete_marker.touch()
-        print(f"[{bulletin_type}] {new_count} new bulletin(s) this run"
+        print(f"[{bulletin_type}] {new_count} new, {updated_count} updated bulletin(s) this run"
               + (f", {len(failed)} failed (retried next run)" if failed else ""))
 
 
