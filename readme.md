@@ -29,13 +29,17 @@ download/
 Nothing already downloaded is downloaded again:
 
 - **certfr / debian**: `current/` always holds 100% of the advisories ever fetched; a reference
-  already there is never re-fetched. `new/` is emptied at the start of every run and only holds
-  what that run added -- it is safe to delete its content at any time (never delete `current/`,
+  already there is never re-fetched (except certfr revisions, see below). `new/` is emptied at
+  the start of every run and only holds what that run added -- it is safe to delete its content at any time (never delete `current/`,
   that is what tells the script what it already has).
 - **nvd**: `--source zip` skips years whose `.meta` is unchanged; `--mode update` only asks the
   API for CVEs modified since the last successful API run.
-- **mskb**: a document already in `current/` is never re-fetched (`--force-full` re-fetches
-  everything); `new/` holds what that run downloaded.
+- **certfr**: bulletins revised in the last 90 days (`--refresh-days`) and open alerts are
+  re-fetched each run; a changed one is rewritten in `current/` and copied to `new/`. A full
+  listing walk moves bulletins no longer published to `removed/`.
+- **mskb**: a document is re-fetched only when its MSRC `CurrentReleaseDate` changed
+  (`manifest.json`; `--force-full` re-fetches everything); `new/` holds what that run downloaded
+  (new or updated). Documents no longer listed by MSRC are moved to `removed/`.
 - **osv**: per-ecosystem watermark, only changed advisories are fetched after the first run.
 - **cisakev / keveuvd**: full dumps (the sources offer nothing finer), fetched with a conditional
   request (`ETag` / `Last-Modified`) so an unchanged catalog is not re-downloaded.
@@ -269,6 +273,7 @@ python cert_fr_fetch.py --full
 - `--output`: Output directory (default: `download/certfr`)
 - `--types`: Comma-separated bulletin types to fetch (default: `avis,alerte`)
 - `--full`: Walk every listing page instead of stopping at the first already-downloaded page
+- `--refresh-days`: Re-fetch bulletins revised within this many days, to pick up revisions (default: `90`)
 - `--delay`: Delay between requests in seconds (default: `0.3`)
 - `--proxy`: Proxy URL for all outbound requests (see [Enterprise Proxy](#enterprise-proxy))
 
@@ -283,8 +288,15 @@ all already in `current/` -- a daily run typically reads one or two listing page
 Bulletins whose download failed are recorded in `failed.json` and retried directly on the next
 run. `--full` forces a complete walk (still without re-downloading anything already there).
 
-Revisions of an already-downloaded bulletin (same reference, updated content) are not
-re-fetched.
+Revisions (same reference, updated content): each run also re-fetches the bulletins of
+`current/` whose latest `revision_date` is within `--refresh-days` (default 90), plus alerts whose
+`closed_at` is still empty. A bulletin whose content changed is rewritten in `current/` and copied
+to `new/`. Older revisions are not picked up.
+
+Removals: after a complete listing walk (first run or `--full`), bulletins of `current/` that are
+no longer in the listing are moved to `removed/` -- never deleted. An incremental run does not see
+the whole listing, so it never moves anything. If more than 5% of `current/` is missing from the
+listing, the listing is assumed truncated: a warning is printed and nothing is moved.
 
 ## Output Structure
 
@@ -296,16 +308,16 @@ download/certfr/
 │   ├── current/                 # Every avis ever downloaded (grows over time)
 │   │   ├── CERTFR-2026-AVI-0001.json
 │   │   └── CERTFR-2026-AVI-0002.json
-│   └── new/                     # Reset every run: only bulletins fetched in this run
-│       └── CERTFR-2026-AVI-0002.json
+│   ├── new/                     # Reset every run: bulletins fetched (new or revised) in this run
+│   │   └── CERTFR-2026-AVI-0002.json
+│   └── removed/                 # Bulletins no longer listed by the site (moved from current/)
 └── alerte/
     ├── current/
     └── new/
 ```
 
-`current/` is the cumulative mirror and also the delta reference (a bulletin already there is
-never re-fetched). `new/` is emptied at the start of every run and ends up holding exactly the
-bulletins added during that run -- convenient for feeding only "what's new today" into a
+`current/` is the cumulative mirror and also the delta reference. `new/` is emptied at the start
+of every run and ends up holding exactly the bulletins added or revised during that run -- convenient for feeding only "what's new today" into a
 downstream pipeline without diffing `current/` yourself.
 
 ---
@@ -417,7 +429,7 @@ always asks for XML and checks that each answer is a CVRF XML document before wr
 ## Usage
 
 ```bash
-# Only the documents not downloaded yet
+# Only the documents not downloaded yet, or revised by MSRC since the last run
 python mskb_cvrf_fetch.py
 
 # Re-download every document (MSRC revises old months in place: same ID, new content)
@@ -433,16 +445,25 @@ python mskb_cvrf_fetch.py --proxy http://user:pass@proxy.company.com:8080
 
 - `--output`: Output directory (default: `download/mskb`)
 - `--ids`: Comma-separated document IDs (default: all)
-- `--force-full`: Re-download every document, even those already in `current/`
+- `--force-full`: Re-download every document, even unchanged ones
 - `--proxy`: Proxy URL for all outbound requests (see [Enterprise Proxy](#enterprise-proxy))
 
 ## Output Structure
 
 ```
 download/mskb/
+├── manifest.json         # {ID: CurrentReleaseDate} of each document in current/
 ├── current/              # every document fetched so far (cvrf_<ID>.xml)
-└── new/                  # only what this run downloaded -- copy this to DT
+├── new/                  # only what this run downloaded (new or updated) -- copy this to DT
+└── removed/              # documents no longer listed by MSRC (moved from current/)
 ```
+
+MSRC revises documents in place (same ID, new `CurrentReleaseDate`). Each run compares the listed
+date with `manifest.json` and re-downloads the changed documents into `current/` and `new/`. On the
+first run after an upgrade, there is no manifest yet, so every document is downloaded once.
+Documents missing from the MSRC listing are moved to `removed/` (not done with `--ids`). If more
+than 5% of `current/` is missing, the listing is assumed truncated: a warning is printed and
+nothing is moved.
 
 DT deletes each file from its offline directory once its mappings are committed, and moves a file
 it cannot parse to an `error/` subdirectory.
